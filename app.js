@@ -16,12 +16,12 @@ let animationId;
 // Store all detected objects for visualization placement optimization
 let allDetectedObjects = {
     faces: [],
-    hands: [],
+    physicalObjects: [],
     visualizations: []
 };
 
 // Position memory for visualization stabilization
-let previousRectPositions = {};
+let previousVisualizationPositions = {};
 let positionTransitions = {};
 
 // Colors for different detections
@@ -114,7 +114,7 @@ async function startDetection() {
         stopBtn.disabled = false;
         
         // Reset position memory
-        previousRectPositions = {};
+        previousVisualizationPositions = {};
         positionTransitions = {};
         
         // Start detection
@@ -173,21 +173,21 @@ async function detectObjects() {
         // Reset detected objects for this frame
         allDetectedObjects = {
             faces: [],
-            hands: [],
+            physicalObjects: [],
             visualizations: []
         };
         
-        // Track which handIds were seen this frame
-        const seenHandIds = new Set();
+        // Track which objectIds were seen this frame
+        const seenPhysicalObjectIds = new Set();
         
         // Draw face detections
         drawFaceDetections(faceDetections);
         
         // Draw hand detections
-        drawHandDetections(handDetections, seenHandIds);
+        drawHandDetections(handDetections, seenPhysicalObjectIds);
         
-        // Clean up any stale hand positions
-        cleanStaleHandPositions(seenHandIds);
+        // Clean up any stale physical object positions
+        cleanStalePhysicalObjectPositions(seenPhysicalObjectIds);
         
         // Continue detection loop
         animationId = requestAnimationFrame(detectObjects);
@@ -196,20 +196,20 @@ async function detectObjects() {
     }
 }
 
-// Clean up hand positions that haven't been seen recently
-function cleanStaleHandPositions(seenHandIds) {
+// Clean up physical object positions that haven't been seen recently
+function cleanStalePhysicalObjectPositions(seenPhysicalObjectIds) {
     const currentTime = Date.now();
     
-    // Check each hand in our memory
-    Object.keys(previousRectPositions).forEach(handId => {
-        if (!seenHandIds.has(handId)) {
-            const lastSeen = previousRectPositions[handId].lastSeen || 0;
+    // Check each physical object in our memory
+    Object.keys(previousVisualizationPositions).forEach(objectId => {
+        if (!seenPhysicalObjectIds.has(objectId)) {
+            const lastSeen = previousVisualizationPositions[objectId].lastSeen || 0;
             const timeSinceLastSeen = currentTime - lastSeen;
             
-            // If we haven't seen this hand for too long, remove it
+            // If we haven't seen this physical object for too long, remove it
             if (timeSinceLastSeen > stabilizationConfig.positionMemoryTimeout) {
-                delete previousRectPositions[handId];
-                delete positionTransitions[handId];
+                delete previousVisualizationPositions[objectId];
+                delete positionTransitions[objectId];
             }
         }
     });
@@ -268,7 +268,7 @@ function drawFaceDetections(faceDetections) {
 }
 
 // Draw hand bounding boxes
-function drawHandDetections(handDetections, seenHandIds) {
+function drawHandDetections(handDetections, seenPhysicalObjectIds) {
     // Process each hand prediction
     handDetections.forEach((hand, index) => {
         // MediaPipe Hands returns keypoints differently than HandPose
@@ -301,11 +301,11 @@ function drawHandDetections(handDetections, seenHandIds) {
         const handId = `${handedness}_${index}`;
         
         // Mark this hand as seen in this frame
-        seenHandIds.add(handId);
+        seenPhysicalObjectIds.add(handId);
         
         // Update lastSeen timestamp if we have previous position data
-        if (previousRectPositions[handId]) {
-            previousRectPositions[handId].lastSeen = Date.now();
+        if (previousVisualizationPositions[handId]) {
+            previousVisualizationPositions[handId].lastSeen = Date.now();
         }
         
         // Store hand data for visualization placement
@@ -317,7 +317,7 @@ function drawHandDetections(handDetections, seenHandIds) {
             height: boxHeight,
             label: handedness
         };
-        allDetectedObjects.hands.push(handObject);
+        allDetectedObjects.physicalObjects.push(handObject);
         
         // Draw bounding box
         ctx.strokeStyle = colors.hand;
@@ -343,7 +343,7 @@ function drawHandDetections(handDetections, seenHandIds) {
         detectionsElement.appendChild(detectionItem);
         
         // Calculate the optimal position for the red visualization
-        const rectPosition = findOptimalVisualizationPosition(
+        const visualizationPosition = findOptimalVisualizationPosition(
             handObject,
             visualizationConfig.width,
             visualizationConfig.height,
@@ -353,9 +353,9 @@ function drawHandDetections(handDetections, seenHandIds) {
         );
         
         // If we found a valid position
-        if (rectPosition) {
+        if (visualizationPosition) {
             // Apply position stabilization
-            const stabilizedPosition = stabilizeVisualizationPosition(handId, rectPosition);
+            const stabilizedPosition = stabilizeVisualizationPosition(handId, visualizationPosition);
             
             // Draw the red visualization
             ctx.fillStyle = '#FF0000'; // Red color
@@ -401,12 +401,12 @@ function drawHandDetections(handDetections, seenHandIds) {
 }
 
 // Stabilize visualization position to prevent jumping
-function stabilizeVisualizationPosition(handId, newPosition) {
+function stabilizeVisualizationPosition(objectId, newPosition) {
     const currentTime = Date.now();
     
-    // If we have no previous position for this hand, initialize it
-    if (!previousRectPositions[handId]) {
-        previousRectPositions[handId] = {
+    // If we have no previous position for this physical object, initialize it
+    if (!previousVisualizationPositions[objectId]) {
+        previousVisualizationPositions[objectId] = {
             x: newPosition.x,
             y: newPosition.y,
             lastSeen: currentTime
@@ -415,11 +415,11 @@ function stabilizeVisualizationPosition(handId, newPosition) {
     }
     
     // Get previous position
-    const prevPos = previousRectPositions[handId];
+    const prevPos = previousVisualizationPositions[objectId];
     
     // Create or update transition state
-    if (!positionTransitions[handId]) {
-        positionTransitions[handId] = {
+    if (!positionTransitions[objectId]) {
+        positionTransitions[objectId] = {
             targetX: newPosition.x,
             targetY: newPosition.y,
             currentX: prevPos.x,
@@ -427,18 +427,18 @@ function stabilizeVisualizationPosition(handId, newPosition) {
         };
     } else {
         // Update the target position
-        positionTransitions[handId].targetX = newPosition.x;
-        positionTransitions[handId].targetY = newPosition.y;
+        positionTransitions[objectId].targetX = newPosition.x;
+        positionTransitions[objectId].targetY = newPosition.y;
     }
     
-    const transition = positionTransitions[handId];
+    const transition = positionTransitions[objectId];
     
     // Apply smoothing (lerp) between current and target
     transition.currentX += (transition.targetX - transition.currentX) * stabilizationConfig.smoothingFactor;
     transition.currentY += (transition.targetY - transition.currentY) * stabilizationConfig.smoothingFactor;
     
     // Update previous position
-    previousRectPositions[handId] = {
+    previousVisualizationPositions[objectId] = {
         x: transition.currentX,
         y: transition.currentY,
         lastSeen: currentTime
@@ -462,33 +462,33 @@ function calculateIntersectionArea(rect1, rect2) {
 }
 
 // Find the optimal position for a visualization
-function findOptimalVisualizationPosition(hand, rectWidth, rectHeight, allObjects, canvasWidth, canvasHeight) {
-    // Define candidate positions relative to the hand
+function findOptimalVisualizationPosition(physicalObject, visualizationWidth, visualizationHeight, allObjects, canvasWidth, canvasHeight) {
+    // Define candidate positions relative to the physicalObject
     const candidatePositions = [
-        { name: 'right', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y + (h.height/2) - (rectHeight/2) }) },
-        { name: 'left', getPosition: (h) => ({ x: h.x - rectWidth - 10, y: h.y + (h.height/2) - (rectHeight/2) }) },
-        { name: 'top', getPosition: (h) => ({ x: h.x + (h.width/2) - (rectWidth/2), y: h.y - rectHeight - 10 }) },
-        { name: 'bottom', getPosition: (h) => ({ x: h.x + (h.width/2) - (rectWidth/2), y: h.y + h.height + 10 }) },
-        { name: 'topRight', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y - rectHeight - 10 }) },
-        { name: 'topLeft', getPosition: (h) => ({ x: h.x - rectWidth - 10, y: h.y - rectHeight - 10 }) },
+        { name: 'right', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y + (h.height/2) - (visualizationHeight/2) }) },
+        { name: 'left', getPosition: (h) => ({ x: h.x - visualizationWidth - 10, y: h.y + (h.height/2) - (visualizationHeight/2) }) },
+        { name: 'top', getPosition: (h) => ({ x: h.x + (h.width/2) - (visualizationWidth/2), y: h.y - visualizationHeight - 10 }) },
+        { name: 'bottom', getPosition: (h) => ({ x: h.x + (h.width/2) - (visualizationWidth/2), y: h.y + h.height + 10 }) },
+        { name: 'topRight', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y - visualizationHeight - 10 }) },
+        { name: 'topLeft', getPosition: (h) => ({ x: h.x - visualizationWidth - 10, y: h.y - visualizationHeight - 10 }) },
         { name: 'bottomRight', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y + h.height + 10 }) },
-        { name: 'bottomLeft', getPosition: (h) => ({ x: h.x - rectWidth - 10, y: h.y + h.height + 10 }) }
+        { name: 'bottomLeft', getPosition: (h) => ({ x: h.x - visualizationWidth - 10, y: h.y + h.height + 10 }) }
     ];
     
-    // Get previous position for this hand if it exists
-    const prevPosition = previousRectPositions[hand.id];
+    // Get previous position for this physicalObject if it exists
+    const prevPosition = previousVisualizationPositions[physicalObject.id];
     
     // Evaluate each position
     const positionScores = candidatePositions.map(pos => {
-        const rect = {
-            ...pos.getPosition(hand),
-            width: rectWidth,
-            height: rectHeight
+        const visualization = {
+            ...pos.getPosition(physicalObject),
+            width: visualizationWidth,
+            height: visualizationHeight
         };
         
         // Check if visualization is within canvas bounds
-        if (rect.x < 0 || rect.y < 0 || rect.x + rect.width > canvasWidth || rect.y + rect.height > canvasHeight) {
-            return { position: pos.name, rect, score: -1000 }; // Heavily penalize out-of-bounds
+        if (visualization.x < 0 || visualization.y < 0 || visualization.x + visualization.width > canvasWidth || visualization.y + visualization.height > canvasHeight) {
+            return { position: pos.name, visualization, score: -1000 }; // Heavily penalize out-of-bounds
         }
         
         // Calculate scores based on intersections
@@ -496,36 +496,36 @@ function findOptimalVisualizationPosition(hand, rectWidth, rectHeight, allObject
         
         // Penalize intersections with faces (highest penalty)
         allObjects.faces.forEach(face => {
-            const intersection = calculateIntersectionArea(rect, face);
+            const intersection = calculateIntersectionArea(visualization, face);
             score -= intersection * 10; // Higher penalty for face intersections
         });
         
-        // Penalize intersections with hands
-        allObjects.hands.forEach(otherHand => {
-            if (otherHand !== hand) { // Don't penalize intersection with self
-                const intersection = calculateIntersectionArea(rect, otherHand);
+        // Penalize intersections with physicalObjects
+        allObjects.physicalObjects.forEach(otherPhysicalObject => {
+            if (otherPhysicalObject !== physicalObject) { // Don't penalize intersection with self
+                const intersection = calculateIntersectionArea(visualization, otherPhysicalObject);
                 score -= intersection * 5;
             }
         });
         
         // Penalize intersections with other visualizations
-        allObjects.visualizations.forEach(otherRect => {
-            const intersection = calculateIntersectionArea(rect, otherRect);
+        allObjects.visualizations.forEach(otherVisualization => {
+            const intersection = calculateIntersectionArea(visualization, otherVisualization);
             score -= intersection * 5;
         });
         
-        // Prefer positions closer to the hand (distance penalty)
-        const handCenter = {
-            x: hand.x + hand.width/2,
-            y: hand.y + hand.height/2
+        // Prefer positions closer to the physicalObject (distance penalty)
+        const physicalObjectCenter = {
+            x: physicalObject.x + physicalObject.width/2,
+            y: physicalObject.y + physicalObject.height/2
         };
-        const rectCenter = {
-            x: rect.x + rect.width/2,
-            y: rect.y + rect.height/2
+        const visualizationCenter = {
+            x: visualization.x + visualization.width/2,
+            y: visualization.y + visualization.height/2
         };
         const distance = Math.sqrt(
-            Math.pow(handCenter.x - rectCenter.x, 2) + 
-            Math.pow(handCenter.y - rectCenter.y, 2)
+            Math.pow(physicalObjectCenter.x - visualizationCenter.x, 2) + 
+            Math.pow(physicalObjectCenter.y - visualizationCenter.y, 2)
         );
         score -= distance * 0.1; // Small distance penalty
         
@@ -536,8 +536,8 @@ function findOptimalVisualizationPosition(hand, rectWidth, rectHeight, allObject
         if (prevPosition) {
             // Check if this position is close to the previous position
             const distanceToPrev = Math.sqrt(
-                Math.pow(rect.x - prevPosition.x, 2) + 
-                Math.pow(rect.y - prevPosition.y, 2)
+                Math.pow(visualization.x - prevPosition.x, 2) + 
+                Math.pow(visualization.y - prevPosition.y, 2)
             );
             
             // If we're fairly close to previous position, add a big bonus
@@ -546,14 +546,14 @@ function findOptimalVisualizationPosition(hand, rectWidth, rectHeight, allObject
             }
         }
         
-        return { position: pos.name, rect, score };
+        return { position: pos.name, visualization, score };
     });
     
     // Find position with highest score
     positionScores.sort((a, b) => b.score - a.score);
     const bestPosition = positionScores[0];
     
-    return bestPosition.rect;
+    return bestPosition.visualization;
 }
 
 // Initialize the app when the page loads
