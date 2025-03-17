@@ -20,6 +20,12 @@ let allDetectedObjects = {
     visualizations: []
 };
 
+// Visualization registry to manage multiple visualizations per physical object
+let visualizationRegistry = {
+    // Format: objectId: [array of visualization configs]
+    // Each config includes: id, width, height, color, content, priority, etc.
+};
+
 // Position memory for visualization stabilization
 let previousVisualizationPositions = {};
 let positionTransitions = {};
@@ -28,12 +34,6 @@ let positionTransitions = {};
 const colors = {
     face: '#FF0000',  // Red
     hand: '#00FF00'   // Green
-};
-
-// Visualization dimensions
-const visualizationConfig = {
-    width: 100,
-    height: 160
 };
 
 // Stabilization configuration
@@ -188,6 +188,7 @@ async function detectObjects() {
         
         // Clean up any stale physical object positions
         cleanStalePhysicalObjectPositions(seenPhysicalObjectIds);
+        cleanupStaleVisualizations();
         
         // Continue detection loop
         animationId = requestAnimationFrame(detectObjects);
@@ -342,61 +343,60 @@ function drawHandDetections(handDetections, seenPhysicalObjectIds) {
         `;
         detectionsElement.appendChild(detectionItem);
         
-        // Calculate the optimal position for the red visualization
-        const visualizationPosition = findOptimalVisualizationPosition(
-            handObject,
-            visualizationConfig.width,
-            visualizationConfig.height,
-            allDetectedObjects,
-            canvas.width,
-            canvas.height
-        );
-        
-        // If we found a valid position
-        if (visualizationPosition) {
-            // Apply position stabilization
-            const stabilizedPosition = stabilizeVisualizationPosition(handId, visualizationPosition);
-            
-            // Draw the red visualization
-            ctx.fillStyle = '#FF0000'; // Red color
-            ctx.fillRect(
-                stabilizedPosition.x, 
-                stabilizedPosition.y, 
-                visualizationConfig.width, 
-                visualizationConfig.height
-            );
-            
-            // Add a white border to make it more visible
-            ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(
-                stabilizedPosition.x, 
-                stabilizedPosition.y, 
-                visualizationConfig.width, 
-                visualizationConfig.height
-            );
-            
-            // Add hand label on the red visualization
-            ctx.fillStyle = '#FFFFFF';
-            ctx.font = '16px Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(
-                handedness[0], 
-                stabilizedPosition.x + visualizationConfig.width/2, 
-                stabilizedPosition.y + visualizationConfig.height/2
-            );  // First letter of handedness
-            ctx.textAlign = 'start'; // Reset text alignment
-            ctx.textBaseline = 'alphabetic'; // Reset text baseline
-            
-            // Store the visualization for future placement calculations
-            allDetectedObjects.visualizations.push({
-                x: stabilizedPosition.x,
-                y: stabilizedPosition.y,
-                width: visualizationConfig.width,
-                height: visualizationConfig.height
-            });
+        // Initialize or get visualizations for this hand
+        if (!visualizationRegistry[handId]) {
+            initializeObjectVisualizations(handId, handedness);
         }
+        
+        // Get all visualizations for this hand
+        const handVisualizations = getVisualizationsForObject(handId);
+        
+        // Track positions assigned to visualizations for this hand
+        const assignedPositions = {};
+        
+        // Process visualizations in order of priority (highest first)
+        const sortedVisualizations = [...handVisualizations].sort((a, b) => b.priority - a.priority);
+        
+        sortedVisualizations.forEach(visualization => {
+            // Calculate the optimal position for this visualization
+            const visualizationPosition = findOptimalVisualizationPosition(
+                handObject,
+                visualization.width,
+                visualization.height,
+                visualization.id,
+                allDetectedObjects,
+                canvas.width,
+                canvas.height,
+                assignedPositions
+            );
+            
+            // If we found a valid position
+            if (visualizationPosition) {
+                // Generate a unique stabilization ID for this visualization
+                const stabilizationId = `${handId}_${visualization.id}`;
+                
+                // Apply position stabilization
+                const stabilizedPosition = stabilizeVisualizationPosition(stabilizationId, visualizationPosition);
+                
+                // Draw the visualization
+                drawVisualization(visualization, stabilizedPosition);
+                
+                // Store the visualization for future placement calculations
+                const placedVisualization = {
+                    x: stabilizedPosition.x,
+                    y: stabilizedPosition.y,
+                    width: visualization.width,
+                    height: visualization.height,
+                    priority: visualization.priority,
+                    id: visualization.id
+                };
+                
+                // Add to the global list of visualizations
+                allDetectedObjects.visualizations.push(placedVisualization);
+                // Add to assigned positions for this hand
+                assignedPositions[visualization.id] = placedVisualization;
+            }
+        });
     });
 }
 
@@ -462,8 +462,8 @@ function calculateIntersectionArea(rect1, rect2) {
 }
 
 // Find the optimal position for a visualization
-function findOptimalVisualizationPosition(physicalObject, visualizationWidth, visualizationHeight, allObjects, canvasWidth, canvasHeight) {
-    // Define candidate positions relative to the physicalObject
+function findOptimalVisualizationPosition(physicalObject, visualizationWidth, visualizationHeight, visualizationId, allObjects, canvasWidth, canvasHeight, existingPositions = {}) {
+    // Define all candidate positions
     const candidatePositions = [
         { name: 'right', getPosition: (h) => ({ x: h.x + h.width + 10, y: h.y + (h.height/2) - (visualizationHeight/2) }) },
         { name: 'left', getPosition: (h) => ({ x: h.x - visualizationWidth - 10, y: h.y + (h.height/2) - (visualizationHeight/2) }) },
@@ -476,7 +476,11 @@ function findOptimalVisualizationPosition(physicalObject, visualizationWidth, vi
     ];
     
     // Get previous position for this physicalObject if it exists
-    const prevPosition = previousVisualizationPositions[physicalObject.id];
+    const prevPosition = previousVisualizationPositions[`${physicalObject.id}_${visualizationId}`];
+    
+    // Get the visualization config to check preferred positions
+    const visualizationConfig = visualizationRegistry[physicalObject.id]?.find(v => v.id === visualizationId);
+    const preferredPositions = visualizationConfig?.preferredPositions || {};
     
     // Evaluate each position
     const positionScores = candidatePositions.map(pos => {
@@ -487,12 +491,21 @@ function findOptimalVisualizationPosition(physicalObject, visualizationWidth, vi
         };
         
         // Check if visualization is within canvas bounds
-        if (visualization.x < 0 || visualization.y < 0 || visualization.x + visualization.width > canvasWidth || visualization.y + visualization.height > canvasHeight) {
+        if (visualization.x < 0 || visualization.y < 0 || 
+            visualization.x + visualization.width > canvasWidth || 
+            visualization.y + visualization.height > canvasHeight) {
             return { position: pos.name, visualization, score: -1000 }; // Heavily penalize out-of-bounds
         }
         
         // Calculate scores based on intersections
         let score = 0;
+        
+        // Add position preference bonus
+        if (preferredPositions[pos.name]) {
+            // Higher bonus for more preferred positions (earlier in the list)
+            const preferenceBonus = preferredPositions[pos.name];
+            score += preferenceBonus;
+        }
         
         // Penalize intersections with faces (highest penalty)
         allObjects.faces.forEach(face => {
@@ -502,16 +515,16 @@ function findOptimalVisualizationPosition(physicalObject, visualizationWidth, vi
         
         // Penalize intersections with physicalObjects
         allObjects.physicalObjects.forEach(otherPhysicalObject => {
-            if (otherPhysicalObject !== physicalObject) { // Don't penalize intersection with self
+            if (otherPhysicalObject !== physicalObject) {
                 const intersection = calculateIntersectionArea(visualization, otherPhysicalObject);
                 score -= intersection * 5;
             }
         });
         
-        // Penalize intersections with other visualizations
-        allObjects.visualizations.forEach(otherVisualization => {
-            const intersection = calculateIntersectionArea(visualization, otherVisualization);
-            score -= intersection * 5;
+        // Add penalties for overlapping with existing visualizations for this object
+        Object.values(existingPositions).forEach(existingVisualization => {
+            const intersection = calculateIntersectionArea(visualization, existingVisualization);
+            score -= intersection * 10;
         });
         
         // Prefer positions closer to the physicalObject (distance penalty)
@@ -529,18 +542,12 @@ function findOptimalVisualizationPosition(physicalObject, visualizationWidth, vi
         );
         score -= distance * 0.1; // Small distance penalty
         
-        // Bonus for preferred positions (right side is preferred)
-        if (pos.name === 'top') score += 100;
-        
         // Bonus for position consistency - favor previous position
         if (prevPosition) {
-            // Check if this position is close to the previous position
             const distanceToPrev = Math.sqrt(
                 Math.pow(visualization.x - prevPosition.x, 2) + 
                 Math.pow(visualization.y - prevPosition.y, 2)
             );
-            
-            // If we're fairly close to previous position, add a big bonus
             if (distanceToPrev < 50) {
                 score += stabilizationConfig.previousPositionBonus;
             }
@@ -554,6 +561,93 @@ function findOptimalVisualizationPosition(physicalObject, visualizationWidth, vi
     const bestPosition = positionScores[0];
     
     return bestPosition.visualization;
+}
+
+// Initialize visualizations for a detected physical object
+function initializeObjectVisualizations(objectId, objectLabel) {
+    // Create visualizations based on object type
+    visualizationRegistry[objectId] = [
+        {
+            id: `${objectId}_primary`,
+            objectId: objectId,
+            width: 100,
+            height: 160,
+            priority: 2,  // Higher priority
+            color: '#FF0000',
+            content: objectLabel[0],  // First letter of handedness
+            preferredPositions: {
+                top: 400,
+                right: 200,
+                left: 200,
+            }, // Prefer top and right positions
+        },
+        {
+            id: `${objectId}_secondary`,
+            objectId: objectId,
+            width: 80,  // Smaller secondary visualization
+            height: 80,
+            priority: 1,  // Lower priority
+            color: '#0000FF',
+            content: '2',
+            preferredPositions: {
+                bottom: 200,
+                right: 200,
+                left: 200,
+            },  // Prefer right and bottom positions
+        }
+    ];
+}
+
+// Get all visualizations for a physical object
+function getVisualizationsForObject(objectId) {
+    return visualizationRegistry[objectId] || [];
+}
+
+// Clean up visualizations for objects that no longer exist
+function cleanupStaleVisualizations() {
+    for (const objectId in visualizationRegistry) {
+        if (!previousVisualizationPositions[objectId] || 
+            Date.now() - previousVisualizationPositions[objectId].lastSeen > stabilizationConfig.positionMemoryTimeout) {
+            delete visualizationRegistry[objectId];
+        }
+    }
+}
+
+// Draw a specific visualization
+function drawVisualization(visualization, position) {
+    ctx.fillStyle = visualization.color || '#FF0000';
+    ctx.fillRect(
+        position.x, 
+        position.y, 
+        visualization.width, 
+        visualization.height
+    );
+    
+    // Add a white border to make it more visible
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(
+        position.x, 
+        position.y, 
+        visualization.width, 
+        visualization.height
+    );
+    
+    // Add text content if specified
+    if (visualization.content) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '16px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+            visualization.content, 
+            position.x + visualization.width/2, 
+            position.y + visualization.height/2
+        );
+    }
+    
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
 }
 
 // Initialize the app when the page loads
